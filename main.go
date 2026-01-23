@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Produk represents a product in the cashier system
@@ -16,6 +17,12 @@ type Produk struct {
 	Stok  int    `json:"stok"`
 }
 
+type Category struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
 // In-memory storage (sementara, nanti ganti database)
 var produk = []Produk{
 	{ID: 1, Nama: "Indomie Godog", Harga: 3500, Stok: 10},
@@ -23,10 +30,14 @@ var produk = []Produk{
 	{ID: 3, Nama: "kecap", Harga: 12000, Stok: 20},
 }
 
-var categories = []Category{
-	{ID: 1, Name: "Makanan", Description: "Kategori makanan dan minuman"},
-	{ID: 2, Name: "Kebutuhan Rumah", Description: "Perlengkapan rumah tangga"},
-}
+// in-memory categories + mutex untuk safety konkuren
+var (
+	categories = []Category{
+		{ID: 1, Name: "Makanan", Description: "Kategori makanan dan minuman"},
+		{ID: 2, Name: "Kebutuhan Rumah", Description: "Perlengkapan rumah tangga"},
+	}
+	categoriesMutex sync.RWMutex
+)
 
 // ---------------- Produk handlers ----------------
 
@@ -105,109 +116,141 @@ func deleteProduk(w http.ResponseWriter, r *http.Request) {
 
 // ---------------- Category handlers ----------------
 
-// Helper: find index by ID, returns -1 jika tidak ada
-func findCategoryIndexByID(id int) int {
-	for i, c := range categories {
-		if c.ID == id {
-			return i
-		}
-	}
-	return -1
+// helper: parse ID dari path "/api/categories/{id}" (menghapus leading/trailing slash)
+func parseCategoryIDFromPath(path string) (int, error) {
+	// path expected to start with "/api/categories/"
+	idStr := strings.TrimPrefix(path, "/api/categories/")
+	idStr = strings.Trim(idStr, "/")
+	return strconv.Atoi(idStr)
 }
 
-// GET /categories
-// POST /categories
-func handleCategories(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method == http.MethodGet {
-		json.NewEncoder(w).Encode(categories)
+// GET /api/categories
+func listCategories(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
-	} else if r.Method == http.MethodPost {
-		var newCat Category
-		if err := json.NewDecoder(r.Body).Decode(&newCat); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-		// Simple validation
-		newCat.Name = strings.TrimSpace(newCat.Name)
-		if newCat.Name == "" {
-			http.Error(w, "Name is required", http.StatusBadRequest)
-			return
-		}
-		// generate ID (simple)
-		newCat.ID = 1
-		if len(categories) > 0 {
-			newCat.ID = categories[len(categories)-1].ID + 1
-		}
-		categories = append(categories, newCat)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(newCat)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	categoriesMutex.RLock()
+	defer categoriesMutex.RUnlock()
+	json.NewEncoder(w).Encode(categories)
+}
+
+// POST /api/categories
+func createCategory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	var newCat Category
+	if err := json.NewDecoder(r.Body).Decode(&newCat); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	newCat.Name = strings.TrimSpace(newCat.Name)
+	if newCat.Name == "" {
+		http.Error(w, "Name is required", http.StatusBadRequest)
 		return
 	}
 
-	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	categoriesMutex.Lock()
+	defer categoriesMutex.Unlock()
+	newID := 1
+	if len(categories) > 0 {
+		newID = categories[len(categories)-1].ID + 1
+	}
+	newCat.ID = newID
+	categories = append(categories, newCat)
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(newCat)
 }
 
-// GET /categories/{id}
-// PUT /categories/{id}
-// DELETE /categories/{id}
-func handleCategoryByID(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	idStr := strings.TrimPrefix(r.URL.Path, "/categories/")
-	id, err := strconv.Atoi(idStr)
+// GET /api/categories/{id}
+func getCategoriesByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id, err := parseCategoryIDFromPath(r.URL.Path)
 	if err != nil {
 		http.Error(w, "Invalid category ID", http.StatusBadRequest)
 		return
 	}
 
-	idx := findCategoryIndexByID(id)
-	if idx == -1 && r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodDelete && r.Method != http.MethodGet {
+	categoriesMutex.RLock()
+	defer categoriesMutex.RUnlock()
+	for _, c := range categories {
+		if c.ID == id {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(c)
+			return
+		}
+	}
+	http.Error(w, "Category not found", http.StatusNotFound)
+}
+
+// PUT /api/categories/{id}
+func updateCategories(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	switch r.Method {
-	case http.MethodGet:
-		if idx == -1 {
-			http.Error(w, "Category not found", http.StatusNotFound)
-			return
-		}
-		json.NewEncoder(w).Encode(categories[idx])
+	id, err := parseCategoryIDFromPath(r.URL.Path)
+	if err != nil {
+		http.Error(w, "Invalid category ID", http.StatusBadRequest)
 		return
+	}
 
-	case http.MethodPut:
-		if idx == -1 {
-			http.Error(w, "Category not found", http.StatusNotFound)
-			return
-		}
-		var upd Category
-		if err := json.NewDecoder(r.Body).Decode(&upd); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-		upd.Name = strings.TrimSpace(upd.Name)
-		if upd.Name == "" {
-			http.Error(w, "Name is required", http.StatusBadRequest)
-			return
-		}
-		upd.ID = id
-		categories[idx] = upd
-		json.NewEncoder(w).Encode(upd)
+	var upd Category
+	if err := json.NewDecoder(r.Body).Decode(&upd); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		return
+	}
+	upd.Name = strings.TrimSpace(upd.Name)
+	if upd.Name == "" {
+		http.Error(w, "Name is required", http.StatusBadRequest)
+		return
+	}
 
-	case http.MethodDelete:
-		if idx == -1 {
-			http.Error(w, "Category not found", http.StatusNotFound)
+	categoriesMutex.Lock()
+	defer categoriesMutex.Unlock()
+	for i := range categories {
+		if categories[i].ID == id {
+			upd.ID = id
+			categories[i] = upd
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(upd)
 			return
 		}
-		categories = append(categories[:idx], categories[idx+1:]...)
-		json.NewEncoder(w).Encode(map[string]string{"message": "sukses delete"})
-		return
+	}
+	http.Error(w, "Category not found", http.StatusNotFound)
+}
 
-	default:
+// DELETE /api/categories/{id}
+func deleteCategories(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	id, err := parseCategoryIDFromPath(r.URL.Path)
+	if err != nil {
+		http.Error(w, "Invalid category ID", http.StatusBadRequest)
+		return
+	}
+
+	categoriesMutex.Lock()
+	defer categoriesMutex.Unlock()
+	for i, c := range categories {
+		if c.ID == id {
+			categories = append(categories[:i], categories[i+1:]...)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "sukses delete"})
+			return
+		}
+	}
+	http.Error(w, "Category not found", http.StatusNotFound)
 }
 
 func main() {
@@ -247,8 +290,43 @@ func main() {
 	})
 
 	// Category routes
-	http.HandleFunc("/categories", handleCategories)
-	http.HandleFunc("/categories/", handleCategoryByID)
+	http.HandleFunc("/api/categories/", func(w http.ResponseWriter, r *http.Request) {
+		// jika request ke "/api/categories/" (dengan trailing slash) dan POST, terima juga
+		if r.URL.Path == "/api/categories/" && r.Method == http.MethodPost {
+			createCategory(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			getCategoriesByID(w, r)
+		} else if r.Method == http.MethodPut {
+			updateCategories(w, r)
+		} else if r.Method == http.MethodDelete {
+			deleteCategories(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	http.HandleFunc("/api/categories", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(categories)
+		} else if r.Method == http.MethodPost {
+			var categoryBaru Category
+			err := json.NewDecoder(r.Body).Decode(&categoryBaru)
+			if err != nil {
+				http.Error(w, "Invalid request", http.StatusBadRequest)
+				return
+			}
+			categoryBaru.ID = len(categories) + 1
+			categories = append(categories, categoryBaru)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(categoryBaru)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 
 	// Health
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -260,9 +338,10 @@ func main() {
 	})
 
 	fmt.Println("Server running di localhost:8080")
+
+	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		// ALWAYS handle error!
-		http.Error(w, "Error message", http.StatusBadRequest)
-		return
+		fmt.Println("gagal running server")
 	}
 }
