@@ -15,30 +15,14 @@ import (
 )
 
 type Config struct {
-	Port string `mapstructure:"PORT"`
+	Port   string `mapstructure:"PORT"`
+	DBConn string `mapstructure:"DBCONN"`
 }
-
-// ---------------- Produk handlers ----------------
-	// Setup routes
-http.HandleFunc("/api/produk", productHandler.HandleProducts)
-http.HandleFunc("/api/produk/", productHandler.HandleProductByID)
-
-	// ---------------- Category handlers ----------------
-
-	// Setup routes
-http.HandleFunc("/api/categories", categoryHandler.HandleCategories)
-http.HandleFunc("/api/categories/", categoryHandler.HandleCategoryByID)
 
 func main() {
 
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-
-	productRepo := repositories.NewProductRepository(db)
-	productService := services.NewProductService(productRepo)
-	productHandler := handlers.NewProductHandler(productService)
-
-	
 
 	if _, err := os.Stat(".env"); err == nil {
 		viper.SetConfigFile(".env")
@@ -47,15 +31,7 @@ func main() {
 
 	config := Config{
 		Port:   viper.GetString("PORT"),
-		DBCONN: viper.GetString("DBCONN"),
-	}
-
-	addr := "0.0.0.0:" + config.Port
-	fmt.Println("Server running di", addr)
-
-	err = http.ListenAndServe(addr, nil)
-	if err != nil {
-		fmt.Println("gagal running server", err)
+		DBConn: viper.GetString("DBCONN"),
 	}
 
 	// Setup database
@@ -64,5 +40,34 @@ func main() {
 		log.Fatal("Failed to initialize database:", err)
 	}
 	defer db.Close()
+
+	productRepo := repositories.NewProductRepository(db)
+	productService := services.NewProductService(productRepo)
+	productHandler := handlers.NewProductHandler(productService)
+
+	categoryRepo := repositories.NewCategoryRepository(db)
+	categoryService := services.NewCategoryService(categoryRepo)
+	categoryHandler := handlers.NewCategoryHandler(categoryService)
+
+	// ---------------- Produk handlers ----------------
+	// Setup routes
+	http.HandleFunc("/api/produk", productHandler.HandleProducts)
+	http.HandleFunc("/api/produk/", productHandler.HandleProductByID)
+
+	// ---------------- Category handlers ----------------
+
+	// Setup routes
+	http.HandleFunc("/api/categories", categoryHandler.HandleCategories)
+	http.HandleFunc("/api/categories/", categoryHandler.HandleCategoryByID)
+
+	// Start server
+
+	addr := "0.0.0.0:" + config.Port
+	fmt.Println("Server running di", addr)
+
+	err = http.ListenAndServe(addr, nil)
+	if err != nil {
+		fmt.Println("gagal running server", err)
+	}
 
 }
